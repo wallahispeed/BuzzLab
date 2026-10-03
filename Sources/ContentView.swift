@@ -28,10 +28,23 @@ struct ContentView: View {
 struct HapticsTab: View {
     @EnvironmentObject var haptics: HapticManager
 
-    @State private var mode: HapticMode = .continuous
+    @State private var mode: HapticMode = .pulse
     @State private var intensity: Double = 1.0
     @State private var sharpness: Double = 1.0
-    @State private var rate: Double = 10
+    @State private var speedPos: Double = 0.5   // 0...1, log scale 0.5...120 cycles per second
+    @State private var maxSpeed = false
+
+    static let maxSpeedHz = 250.0
+
+    private var hz: Double {
+        maxSpeed ? Self.maxSpeedHz : 0.5 * pow(240, speedPos)
+    }
+
+    private var speedLabel: String {
+        if !mode.usesSpeed { return "Speed  (Constant ignores speed)" }
+        if maxSpeed { return "Speed  MAX (\(Int(Self.maxSpeedHz)) per second)" }
+        return "Speed  \(String(format: "%.1f", hz)) per second"
+    }
 
     var body: some View {
         NavigationStack {
@@ -53,8 +66,8 @@ struct HapticsTab: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
 
-                Section("Custom") {
-                    Picker("Mode", selection: $mode) {
+                Section("Pattern") {
+                    Picker("Pattern", selection: $mode) {
                         ForEach(HapticMode.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.menu)
@@ -67,13 +80,23 @@ struct HapticsTab: View {
                         Text("Sharpness  \(Int(sharpness * 100))%")
                         Slider(value: $sharpness, in: 0...1)
                     }
-                    if mode == .pulse || mode == .legacy {
-                        VStack(alignment: .leading) {
-                            Text("Rate  \(Int(rate)) per second")
-                            Slider(value: $rate, in: 1...100, step: 1)
-                        }
+                }
+
+                Section("Speed") {
+                    Toggle("MAX speed", isOn: $maxSpeed)
+                        .disabled(!mode.usesSpeed)
+
+                    VStack(alignment: .leading) {
+                        Text(speedLabel)
+                        Slider(value: $speedPos, in: 0...1)
+                            .disabled(maxSpeed || !mode.usesSpeed)
                     }
 
+                    Text("One cycle of the pattern per count. Past roughly 50 to 100 per second the individual taps blur into one buzz, because the motor can't start and stop that fast.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+
+                Section {
                     Button {
                         if haptics.running && !haptics.maxPowerOn {
                             haptics.stop()
@@ -81,7 +104,7 @@ struct HapticsTab: View {
                             haptics.start(mode: mode,
                                           intensity: Float(intensity),
                                           sharpness: Float(sharpness),
-                                          rate: rate)
+                                          rate: hz)
                         }
                     } label: {
                         Text(haptics.running && !haptics.maxPowerOn ? "Stop" : "Start")
@@ -98,7 +121,8 @@ struct HapticsTab: View {
             .navigationTitle("BuzzLab")
             .onChange(of: intensity) { _, _ in restartIfRunning() }
             .onChange(of: sharpness) { _, _ in restartIfRunning() }
-            .onChange(of: rate) { _, _ in restartIfRunning() }
+            .onChange(of: speedPos) { _, _ in restartIfRunning() }
+            .onChange(of: maxSpeed) { _, _ in restartIfRunning() }
             .onChange(of: mode) { _, _ in restartIfRunning() }
         }
     }
@@ -108,7 +132,7 @@ struct HapticsTab: View {
         haptics.start(mode: mode,
                       intensity: Float(intensity),
                       sharpness: Float(sharpness),
-                      rate: rate)
+                      rate: hz)
     }
 }
 
