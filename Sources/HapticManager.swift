@@ -3,13 +3,23 @@ import AudioToolbox
 import Foundation
 
 enum HapticMode: String, CaseIterable, Identifiable {
-    case continuous = "Continuous"
+    case continuous = "Constant"
     case pulse = "Pulse"
+    case chop = "Buzz chop"
     case heartbeat = "Heartbeat"
-    case ramp = "Ramp"
+    case triple = "Triple tap"
+    case rolling = "Rolling"
+    case rampUp = "Ramp up"
+    case rampDown = "Ramp down"
+    case wave = "Wave"
+    case sos = "SOS"
+    case random = "Random"
     case legacy = "Legacy buzz"
 
     var id: String { rawValue }
+
+    /// Constant ignores speed; every other pattern repeats at the chosen speed.
+    var usesSpeed: Bool { self != .continuous }
 }
 
 /// Full control over the Taptic Engine via Core Haptics.
@@ -72,6 +82,7 @@ final class HapticManager: ObservableObject {
 
     // MARK: - Playback
 
+    /// rate = pattern cycles per second.
     func start(mode: HapticMode, intensity: Float, sharpness: Float, rate: Double) {
         stopPlayerOnly()
         lastMode = mode
@@ -140,54 +151,125 @@ final class HapticManager: ObservableObject {
         ]
     }
 
+    /// One haptic event inside a cycle. dur == nil means a transient tap.
+    private struct Ev {
+        var t: Double
+        var dur: Double?
+        var i: Float
+        var s: Float
+    }
+
     private func buildPattern(mode: HapticMode,
                               intensity: Float,
                               sharpness: Float,
                               rate: Double) throws -> (CHHapticPattern, TimeInterval) {
-        switch mode {
-        case .continuous, .legacy:
+        if mode == .continuous || mode == .legacy {
             // 30 s is the longest a single continuous event can be; the player loops it.
             let ev = CHHapticEvent(eventType: .hapticContinuous,
                                    parameters: params(intensity, sharpness),
                                    relativeTime: 0,
                                    duration: 30)
             return (try CHHapticPattern(events: [ev], parameters: []), 30)
+        }
 
-        case .pulse:
-            let hz = max(rate, 1)
-            let period = 1.0 / hz
-            let count = max(1, Int(ceil(1.0 / period)))
-            var events: [CHHapticEvent] = []
-            for i in 0..<count {
-                events.append(CHHapticEvent(eventType: .hapticTransient,
-                                            parameters: params(intensity, sharpness),
-                                            relativeTime: Double(i) * period))
+        // Every other pattern is one cycle repeated. Speed sets how long a cycle lasts.
+        let hz = min(max(rate, 0.5), 400)
+        let period = 1.0 / hz
+        let first = cycle(mode, period, intensity, sharpness)
+        let perCycle = max(first.count, 1)
+        // Aim for about one second per loop, but cap the number of events.
+        let wanted = max(1, Int(hz.rounded()))
+        let cycles = max(1, min(wanted, 800 / perCycle))
+
+        var events: [CHHapticEvent] = []
+        for c in 0..<cycles {
+            let base = Double(c) * period
+            let list = (c == 0) ? first : cycle(mode, period, intensity, sharpness)
+            for e in list {
+                let i = min(max(e.i, 0), 1)
+                let s = min(max(e.s, 0), 1)
+                if let d = e.dur {
+                    events.append(CHHapticEvent(eventType: .hapticContinuous,
+                                                parameters: params(i, s),
+                                                relativeTime: base + e.t,
+                                                duration: max(d, 0.002)))
+                } else {
+                    events.append(CHHapticEvent(eventType: .hapticTransient,
+                                                parameters: params(i, s),
+                                                relativeTime: base + e.t))
+                }
             }
-            return (try CHHapticPattern(events: events, parameters: []), Double(count) * period)
+        }
+        return (try CHHapticPattern(events: events, parameters: []), Double(cycles) * period)
+    }
+
+    /// One cycle of a pattern, lasting T seconds.
+    private func cycle(_ mode: HapticMode, _ T: Double, _ I: Float, _ S: Float) -> [Ev] {
+        let steps = max(2, min(8, Int(T / 0.01)))
+        switch mode {
+        case .pulse:
+            return [Ev(t: 0, dur: nil, i: I, s: S)]
+
+        case .chop:
+            return [Ev(t: 0, dur: T * 0.5, i: I, s: S)]
 
         case .heartbeat:
-            let a = CHHapticEvent(eventType: .hapticTransient,
-                                  parameters: params(intensity, sharpness),
-                                  relativeTime: 0)
-            let b = CHHapticEvent(eventType: .hapticTransient,
-                                  parameters: params(intensity * 0.7, max(sharpness * 0.6, 0.1)),
-                                  relativeTime: 0.18)
-            return (try CHHapticPattern(events: [a, b], parameters: []), 0.9)
+            return [Ev(t: 0, dur: nil, i: I, s: S),
+                    Ev(t: T * 0.25, dur: nil, i: I * 0.7, s: max(S * 0.6, 0.1))]
 
-        case .ramp:
-            let ev = CHHapticEvent(eventType: .hapticContinuous,
-                                   parameters: params(1, sharpness),
-                                   relativeTime: 0,
-                                   duration: 2)
-            let curve = CHHapticParameterCurve(
-                parameterID: .hapticIntensityControl,
-                controlPoints: [
-                    .init(relativeTime: 0, value: 0.0),
-                    .init(relativeTime: 2, value: intensity)
-                ],
-                relativeTime: 0
-            )
-            return (try CHHapticPattern(events: [ev], parameterCurves: [curve]), 2)
+        case .triple:
+            return [Ev(t: 0, dur: nil, i: I, s: S),
+                    Ev(t: T * 0.1, dur: nil, i: I, s: S),
+                    Ev(t: T * 0.2, dur: nil, i: I, s: S)]
+
+        case .rolling:
+            return [Ev(t: 0, dur: nil, i: I, s: S),
+                    Ev(t: T * 0.5, dur: nil, i: I * 0.6, s: S * 0.2)]
+
+        case .rampUp:
+            return (0..<steps).map { k in
+                Ev(t: T * Double(k) / Double(steps),
+                   dur: T / Double(steps),
+                   i: I * Float(k + 1) / Float(steps),
+                   s: S)
+            }
+
+        case .rampDown:
+            return (0..<steps).map { k in
+                Ev(t: T * Double(k) / Double(steps),
+                   dur: T / Double(steps),
+                   i: I * Float(steps - k) / Float(steps),
+                   s: S)
+            }
+
+        case .wave:
+            let n = max(4, steps)
+            return (0..<n).map { k in
+                let level = 0.55 + 0.45 * sin(2 * Double.pi * Double(k) / Double(n))
+                return Ev(t: T * Double(k) / Double(n),
+                          dur: T / Double(n),
+                          i: I * Float(level),
+                          s: S)
+            }
+
+        case .sos:
+            // Morse S O S spread over one cycle (34 time units).
+            let u = T / 34
+            let marks: [(Double, Double)] = [(0, 1), (2, 1), (4, 1),
+                                             (8, 3), (12, 3), (16, 3),
+                                             (22, 1), (24, 1), (26, 1)]
+            return marks.map { Ev(t: $0.0 * u, dur: $0.1 * u, i: I, s: S) }
+
+        case .random:
+            return (0..<4).map { _ in
+                Ev(t: T * Double.random(in: 0..<1),
+                   dur: nil,
+                   i: I * Float.random(in: 0.3...1),
+                   s: Float.random(in: 0...1))
+            }
+
+        case .continuous, .legacy:
+            return []
         }
     }
 
